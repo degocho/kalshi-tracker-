@@ -1,0 +1,28 @@
+name: Kalshi bot
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Just send a test message"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency: kalshi-bot
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 kalshi_bot.py
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          TEST: ${{ inputs.test }}
+      - run: |
+          git config user.name kalshi-bot
+          git config user.email kalshi-bot@users.noreply.github.com
+          git add state.json 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "state" && git push)

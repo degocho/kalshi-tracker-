@@ -1,0 +1,16 @@
+name: NBA slate bot
+on:
+  schedule:
+    - cron: "47 16 * * *"
+    - cron: "47 22 * * *"
+  workflow_dispatch:
+jobs:
+  slate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 nba_slate.py
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_NBA }}
+          UPDATE: ${{ github.event.schedule == '47 22 * * *' }}

@@ -4,8 +4,12 @@ from datetime import datetime
 
 API = "https://api.elections.kalshi.com/trade-api/v2"
 HOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
-MIN_SCORE = 5        # post trades scoring this or higher
+CATEGORY = os.environ.get("CATEGORY", "").strip().lower()   # e.g. "sports"; blank = all markets
+STATE = os.environ.get("STATE_FILE", "state.json")
+MIN_SCORE = float(os.environ.get("MIN_SCORE", 6 if CATEGORY == "sports" else 5))
+MIN_USD = float(os.environ.get("MIN_USD", 2000 if CATEGORY == "sports" else 250))
 LOOKBACK = 30 * 60   # seconds of trades to scan each run
+LABEL = f"{CATEGORY.title()} " if CATEGORY else ""
 
 def get(path, params=None):
     url = API + path + ("?" + urllib.parse.urlencode(params) if params else "")
@@ -104,8 +108,17 @@ def card(t, m, s, why):
                        {"name": "Score", "value": str(s), "inline": True}],
             "footer": {"text": t["tk"] + " · trades are anonymous; a flag is a lead, not proof"}}
 
+def category_of(tk, st):
+    """Kalshi category for a ticker's series (e.g. 'sports'), cached in state."""
+    series = tk.split("-")[0]
+    cats = st.setdefault("cats", {})
+    if series not in cats:
+        try: cats[series] = (get("/series/" + urllib.parse.quote(series))["series"].get("category") or "").lower()
+        except Exception: return ""
+    return cats[series]
+
 def load_state():
-    try: st = json.load(open("state.json"))
+    try: st = json.load(open(STATE))
     except Exception: st = {}
     if "posted" not in st:                       # upgrade from the old format
         st = {"posted": st, "flags": [], "last_card": time.time()}
@@ -135,7 +148,7 @@ def scorecard(st, days=7):
     pending = [f for f in st["flags"] if f["ts"] >= since and "won" not in f]
     def pl(fs):                                  # profit on $100 per flag at the flagged price
         return sum(100 * (1 - f["price"]) / f["price"] if f["won"] else -100 for f in fs if 0 < f["price"] < 1)
-    lines = [f"**📊 Scorecard: last {days} days**"]
+    lines = [f"**📊 {LABEL}Scorecard: last {days} days**"]
     if not done:
         lines.append(f"No flagged markets have settled yet. {len(pending)} still open.")
     else:
@@ -162,18 +175,20 @@ def main():
     posted = st["posted"]
     if os.environ.get("TEST") == "true":
         check_results(st)
-        post({"content": "✅ Kalshi insider tracker is connected.\n\n" + scorecard(st)})
-        json.dump(st, open("state.json", "w")); return
+        post({"content": f"✅ Kalshi {LABEL}insider tracker is connected.\n\n" + scorecard(st)})
+        json.dump(st, open(STATE, "w")); return
 
     trades = fetch_trades()
     by_tk = defaultdict(list)
     for t in trades: by_tk[t["tk"]].append(t)
-    big = {t["tk"] for t in trades if t["usd"] >= 400}
+    big = {t["tk"] for t in trades if t["usd"] >= max(400, MIN_USD)}
+    if CATEGORY:
+        big = {tk for tk in big if category_of(tk, st) == CATEGORY}
     markets = fetch_markets(sorted(big))
 
     flags = []
     for t in trades:
-        if t["tk"] not in big or not t["side"] or t["usd"] < 250 or t["id"] in posted: continue
+        if t["tk"] not in big or not t["side"] or t["usd"] < MIN_USD or t["id"] in posted: continue
         s, why = score(t, markets.get(t["tk"], {}), [x for x in by_tk[t["tk"]] if x["ts"] <= t["ts"]])
         if s >= MIN_SCORE: flags.append((s, t, why))
     flags.sort(key=lambda f: (-f[0], -f[1]["usd"]))
@@ -199,6 +214,6 @@ def main():
 
     cutoff = time.time() - 6 * 3600
     st["posted"] = {k: v for k, v in posted.items() if v >= cutoff}
-    json.dump(st, open("state.json", "w"))
+    json.dump(st, open(STATE, "w"))
 
 main()

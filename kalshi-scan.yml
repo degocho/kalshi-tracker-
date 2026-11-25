@@ -1,0 +1,44 @@
+name: Kalshi insider scan
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 min (GitHub may run it a few minutes late)
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Just send a test message to Discord"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kalshi-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan Kalshi and post to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ "${{ inputs.test }}" = "true" ]; then
+            python kalshi_discord.py --test
+          else
+            python kalshi_discord.py
+          fi
+      - name: Remember what was posted
+        if: ${{ inputs.test != true }}
+        run: |
+          git config user.name "kalshi-bot"
+          git config user.email "kalshi-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -m "update state" && git push)

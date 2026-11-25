@@ -104,12 +104,66 @@ def card(t, m, s, why):
                        {"name": "Score", "value": str(s), "inline": True}],
             "footer": {"text": t["tk"] + " · trades are anonymous; a flag is a lead, not proof"}}
 
+def load_state():
+    try: st = json.load(open("state.json"))
+    except Exception: st = {}
+    if "posted" not in st:                       # upgrade from the old format
+        st = {"posted": st, "flags": [], "last_card": time.time()}
+    return st
+
+def check_results(st):
+    """Look up how flagged markets settled (up to 40 per run)."""
+    open_flags = [f for f in st["flags"] if "won" not in f and time.time() - f["ts"] > 3600]
+    cache = {}
+    for f in open_flags[:40]:
+        if f["tk"] not in cache:
+            try: cache[f["tk"]] = get("/markets/" + urllib.parse.quote(f["tk"]))["market"]
+            except Exception: cache[f["tk"]] = None
+        m = cache[f["tk"]]
+        if not m: continue
+        result = (m.get("result") or "").lower()
+        if result in ("yes", "no"):
+            f["won"] = result == f["side"]
+        elif (m.get("status") or "").lower() in ("settled", "finalized") and result:
+            f["won"] = None                     # voided market: doesn't count
+    cutoff = time.time() - 60 * 86400
+    st["flags"] = [f for f in st["flags"] if f["ts"] >= cutoff]
+
+def scorecard(st, days=7):
+    since = time.time() - days * 86400
+    done = [f for f in st["flags"] if f["ts"] >= since and f.get("won") is not None]
+    pending = [f for f in st["flags"] if f["ts"] >= since and "won" not in f]
+    def pl(fs):                                  # profit on $100 per flag at the flagged price
+        return sum(100 * (1 - f["price"]) / f["price"] if f["won"] else -100 for f in fs if 0 < f["price"] < 1)
+    lines = [f"**📊 Scorecard: last {days} days**"]
+    if not done:
+        lines.append(f"No flagged markets have settled yet. {len(pending)} still open.")
+    else:
+        wins = sum(f["won"] for f in done)
+        total = pl(done)
+        lines.append(f"Settled flags: **{len(done)}** · right **{wins}** ({wins/len(done)*100:.0f}%)")
+        lines.append(f"$100 on every flag: **{'+' if total >= 0 else '-'}${abs(total):,.0f}** "
+                     f"on ${len(done)*100:,} bet")
+        for lo, hi, name in ((5, 6, "Score 5–6"), (6, 8, "Score 6–8"), (8, 99, "Score 8+")):
+            band = [f for f in done if lo <= f["score"] < hi]
+            if band:
+                w, p = sum(f["won"] for f in band), pl(band)
+                lines.append(f"• {name}: {w}/{len(band)} right, {'+' if p >= 0 else '-'}${abs(p):,.0f}")
+        best = max(done, key=lambda f: (f["won"], (1 - f["price"]) / max(f["price"], 0.01)))
+        if best["won"]:
+            lines.append(f"Best call: {best['title'][:80]} ({best['side'].upper()} @ {best['price']*100:.0f}¢)")
+        lines.append(f"{len(pending)} flags still waiting to settle.")
+    lines.append("_Uses the price the flagged trade paid; you'd usually get a worse price. Fees not included._")
+    return "\n".join(lines)
+
 def main():
     if not HOOK: raise SystemExit("Add the DISCORD_WEBHOOK secret first")
+    st = load_state()
+    posted = st["posted"]
     if os.environ.get("TEST") == "true":
-        post({"content": "✅ Kalshi insider tracker is connected. Flags will show up here."}); return
-    try: posted = json.load(open("state.json"))
-    except Exception: posted = {}
+        check_results(st)
+        post({"content": "✅ Kalshi insider tracker is connected.\n\n" + scorecard(st)})
+        json.dump(st, open("state.json", "w")); return
 
     trades = fetch_trades()
     by_tk = defaultdict(list)
@@ -132,7 +186,19 @@ def main():
         time.sleep(1)
     for s, t, w in flags[10:]: posted[t["id"]] = t["ts"]
 
+    tracked = {f["id"] for f in st["flags"]}
+    for s, t, w in flags:                        # remember every flag for the scorecard
+        if t["id"] in posted and t["id"] not in tracked:
+            st["flags"].append({"id": t["id"], "tk": t["tk"], "side": t["side"], "price": t["price"],
+                                "usd": round(t["usd"]), "ts": t["ts"], "score": s,
+                                "title": markets.get(t["tk"], {}).get("title") or t["tk"]})
+
+    check_results(st)
+    if time.time() - st.get("last_card", 0) >= 7 * 86400:
+        if post({"content": scorecard(st)}): st["last_card"] = time.time()
+
     cutoff = time.time() - 6 * 3600
-    json.dump({k: v for k, v in posted.items() if v >= cutoff}, open("state.json", "w"))
+    st["posted"] = {k: v for k, v in posted.items() if v >= cutoff}
+    json.dump(st, open("state.json", "w"))
 
 main()
